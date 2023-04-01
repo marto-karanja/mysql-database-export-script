@@ -1,0 +1,14 @@
+URL (options)	https://premium278.web-hosting.com/cpanel
+ 	(if DNS propagation is pending)
+ 	http://chuiwrite.com/cpanel
+cPanel username	chuixkdt
+cPanel password	EkIzU5O2LvV1
+
+UPDATE wpcj_posts 
+SET 
+    post_date = DATE_SUB(NOW(), INTERVAL FLOOR(RAND() * 365) DAY), 
+    post_date_gmt = DATE_SUB(UTC_TIMESTAMP(), INTERVAL FLOOR(RAND() * 365) DAY),
+    post_modified = DATE_SUB(NOW(), INTERVAL FLOOR(RAND() * 365) DAY),
+    post_modified_gmt = DATE_SUB(UTC_TIMESTAMP(), INTERVAL FLOOR(RAND() * 365) DAY)
+WHERE post_status = 'future' 
+AND post_date > NOW();

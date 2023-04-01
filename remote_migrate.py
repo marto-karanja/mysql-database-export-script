@@ -1,5 +1,8 @@
 import os
 import wx
+import threading
+from config import remote_conn_details, local_conn_details
+from queue import Queue, Empty
 from datetime import datetime
 import mysql.connector
 import logging
@@ -126,27 +129,24 @@ class DbMigrate(object):
         #self.local_ssh_connection()
         #self.remote_connection()
 
-        self.remote_conn_details = {
-            "ssh_ip": "162.213.251.237",
-            "ssh_password": "incorrect0727531915",	
-            "ssh_username" : "chuixkdt",
-            "ssh_port": 21098,
-            "ssh_key": "ggdbkeys",
-            "database_user":"chuixkdt_crawls",
-            "database_password": "incorrect1234",
-            "database_name" : "chuixkdt_crawls"
-        }
+        self.remote_conn_details = remote_conn_details
+        self.local_conn_details = local_conn_details
 
-        self.local_conn_details = {
-            "ssh_ip": "209.145.54.52",
-            "ssh_password": "incorrect0727531915",
-            "ssh_username" : "assignmentswrite",
-            "ssh_port": 22,
-            "ssh_key": "database_keys",
-            "database_user":"assignmentswrite_crawls",
-            "database_password": "incorrect0727531915",
-            "database_name" : "assignmentswrite_crawls_b"
-        }
+        self.task_queue = Queue()
+        self.exit_event = threading.Event()
+        self.remote_conn = False
+
+    def launch_threads(self):
+        local_thread = threading.Thread(target=self.launch_threads, daemon= True)
+        local_thread.start()
+
+    def launch_threads(self):
+        self.logger.info("Starting source db thread")
+        local_thread = threading.Thread(target=self.start_threaded_transfer)
+        local_thread.start()
+        self.logger.info("Starting destination db thread")
+        remote_thread = threading.Thread(target=self.insert_query_thread)
+        remote_thread.start()
     
         
     
@@ -244,6 +244,7 @@ class DbMigrate(object):
         
         local_cursor.execute("SHOW TABLES")
         tables = local_cursor.fetchall()
+        self.logger.info(tables)
 
         remote_cursor = self.remote_conn.cursor()
 
@@ -269,6 +270,92 @@ class DbMigrate(object):
         self.close_remote_conn()
         self.close_local_conn()
 
+    def start_threaded_transfer(self):
+
+        self.local_ssh_connection()
+
+
+        local_cursor = self.local_conn.cursor(dictionary=True)
+        
+        local_cursor.execute("SHOW TABLES")
+      
+
+        tables = [table['Tables_in_{}'.format(self.local_conn.database)] for table in local_cursor.fetchall()]
+        #self.logger.info(tables)
+
+        # Loop through each table
+        for table in tables:
+            # Get the column names from the local database
+            local_cursor.execute(f"DESCRIBE {table}")
+            columns = [column['Field'] for column in local_cursor.fetchall()]
+
+            #self.logger.info(f"{table}:{columns}")
+
+            # Get the last exported record ID
+            last_exported_id = 0
+
+            # Number of records per chunk
+            records_per_chunk = 1000
+            
+            end = False
+
+            # Generate the SQL statement to insert the records
+
+            while not end:
+                # Get the next chunk of records
+                if "_links" in table:
+                    local_cursor.execute(f"SELECT * FROM {table} WHERE link_no > {last_exported_id} LIMIT {records_per_chunk}")
+                else:
+                    local_cursor.execute(f"SELECT * FROM {table} WHERE no > {last_exported_id} LIMIT {records_per_chunk}")
+
+                records = local_cursor.fetchall()
+
+                # Break the loop if there are no more records
+                if not records:
+                    end = True
+                    break
+
+                
+                
+                # Generate the insert query
+                insert_query = "INSERT INTO {} ({}) VALUES ({})".format(
+                    table,
+                    ", ".join("`{}`".format(col) for col in columns),
+                    ", ".join(["%s"] * len(columns))
+                )
+
+                self.logger.info(insert_query)
+
+                # put data in queue
+                workload = {"query":insert_query,
+                            "records": records}
+                
+                self.task_queue.put(workload)
+
+
+                ### push to queue to process in a seperate thread
+                if "_links" in table:
+                    last_exported_id = records[-1]['link_no']
+                else:
+                    last_exported_id = records[-1]['no']
+
+                #last_exported_id = self.insert_records(insert_query, records, table)
+
+
+                #self.logger.info(f"[SQL Query]: {insert_query}")
+
+                # Execute the SQL statement
+                
+                self.logger.info(f"Import for batch {last_exported_id} successful")
+
+
+        self.exit_event.set()
+
+        self.logger.info("Finishing execution and closing connections")
+        # Close the connections
+        self.close_remote_conn
+        
+
 
     def start_transfer(self):
 
@@ -290,7 +377,7 @@ class DbMigrate(object):
             last_exported_id = 0
 
             # Number of records per chunk
-            records_per_chunk = 500
+            records_per_chunk = 1000
             
             end = False
 
@@ -320,7 +407,7 @@ class DbMigrate(object):
                 )
 
                 self.logger.info(insert_query)
-
+                
                 last_exported_id = self.insert_records(insert_query, records, table)
 
 
@@ -335,6 +422,44 @@ class DbMigrate(object):
         self.local_conn.close()
         self.remote_conn.close()
         self.tunnel.close()
+
+    
+
+    def insert_query_thread(self):
+        self.remote_connection()
+        while not self.exit_event.is_set():
+            if not self.remote_conn:
+                self.remote_conn()
+            try:
+                # Get the next item from the queue
+                item = self.task_queue.get(block=True, timeout=1)
+                self.process_item(item)
+
+            except Empty:
+                # The queue is empty, so wait for more items to be added
+                logger.info("Queue is empty, waiting for more items")
+
+            except Exception as e:
+                # Handle any other exceptions that might occur during processing
+                logger.error(f"Error processing item: {item}\n{e}")
+
+        self.remote_conn.close()
+
+
+    def process_item(self, item):
+        try:
+            #self.remote_conn.cursor().execute(sql)
+
+            self.remote_conn.cursor().executemany(item["query"], [list(rec.values()) for rec in item["records"]])
+
+            # Commit the changes
+            self.remote_conn.commit()
+        except Exception as e:
+            self.logger.error("Unable to update changes",str(e))
+        else:
+            # Update the last exported record ID
+            self.logger.info("Successfully completed execution ------")
+            
 
 
     
@@ -403,5 +528,5 @@ if __name__ == '__main__':
 
     app.create_remote_tables()
     
-    app.start_transfer()
+    app.launch_threads()
 

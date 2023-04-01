@@ -18,3 +18,6 @@ config.json
 /engine/key
 */keys
 *.db
+config.py
+*.code-workspace
+notes.txt
