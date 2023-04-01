@@ -43,16 +43,16 @@ class DbMigrate(object):
         ssh_password = "incorrect0727531915"
 
 
-        security_key = paramiko.RSAKey.from_private_key_file((os.getcwd() +"\\keys\\database_key"),ssh_password) 
+        security_key = paramiko.RSAKey.from_private_key_file((os.getcwd() +"\\keys\\ggdbkeys"),ssh_password) 
         #security_key = paramiko.RSAKey.from_private_key_file(self.connection_details.security_filepath, self.connection_details.ssh_password)
 
         sshtunnel.SSH_TIMEOUT = 6000.0
         sshtunnel.TUNNEL_TIMEOUT = 12000.0
 
         self.tunnel = sshtunnel.SSHTunnelForwarder(
-                ('198.54.115.176', 21098),
+                ('162.213.251.237', 21098),
                 ssh_private_key=security_key,
-                ssh_username = 'examwfgd',
+                ssh_username = 'chuixkdt',
                 set_keepalive = 12000,
                 remote_bind_address = ('127.0.0.1', 3306)
             )
@@ -63,9 +63,9 @@ class DbMigrate(object):
         try:
             self.remote_conn = mysql.connector.MySQLConnection(
             host = '127.0.0.1',
-            user = 'examwfgd_crawls',
-            passwd = 'incorrect0727531915',
-            db = 'examwfgd_crawls',
+            user = 'chuixkdt_crawls',
+            passwd = 'incorrect1234',
+            db = 'chuixkdt_crawls',
             port=self.tunnel.local_bind_port,
             use_pure=True,
         )
@@ -90,7 +90,8 @@ class DbMigrate(object):
         local_cursor = self.local_conn.cursor()
 
         # Get the table names from the local database
-        local_cursor.execute("SHOW TABLES LIKE '%_content'")
+        #local_cursor.execute("SHOW TABLES LIKE '%_content'")
+        local_cursor.execute("SHOW TABLES")
         tables = local_cursor.fetchall()
 
         remote_cursor = self.remote_conn.cursor()
@@ -120,10 +121,12 @@ class DbMigrate(object):
 
         # Get the table names from the local database
         local_cursor = self.local_conn.cursor(dictionary=True)
-        local_cursor.execute("SHOW TABLES LIKE '%_content'")
+        #local_cursor.execute("SHOW TABLES LIKE '%_content'")
+        local_cursor.execute("SHOW TABLES")
         
         #self.logger.info(tables)
-        tables = [table['Tables_in_{} (%_content)'.format(self.local_conn.database)] for table in local_cursor.fetchall()]
+        #tables = [table['Tables_in_{} (%_content)'.format(self.local_conn.database)] for table in local_cursor.fetchall()]
+        tables = [table['Tables_in_crawls'.format(self.local_conn.database)] for table in local_cursor.fetchall()]
         #self.logger.info(tables)
 
         # Loop through each table
@@ -138,7 +141,7 @@ class DbMigrate(object):
             last_exported_id = 0
 
             # Number of records per chunk
-            records_per_chunk = 1000
+            records_per_chunk = 500
             
             end = False
 
@@ -152,7 +155,10 @@ class DbMigrate(object):
 
             while not end:
                 # Get the next chunk of records
-                local_cursor.execute(f"SELECT * FROM {table} WHERE no > {last_exported_id} LIMIT {records_per_chunk}")
+                if "_links" in table:
+                    local_cursor.execute(f"SELECT * FROM {table} WHERE link_no > {last_exported_id} LIMIT {records_per_chunk}")
+                else:
+                    local_cursor.execute(f"SELECT * FROM {table} WHERE no > {last_exported_id} LIMIT {records_per_chunk}")
                 records = local_cursor.fetchall()
 
                 # Break the loop if there are no more records
@@ -168,6 +174,8 @@ class DbMigrate(object):
                     ", ".join("`{}`".format(col) for col in columns),
                     ", ".join(["%s"] * len(columns))
                 )
+
+                self.logger.info(insert_query)
 
                 
 
@@ -187,7 +195,10 @@ class DbMigrate(object):
                     self.logger.error("Unable to update changes",str(e))
                 else:
                     # Update the last exported record ID
-                    last_exported_id = records[-1]['no']
+                    if "_links" in table:
+                        last_exported_id = records[-1]['link_no']
+                    else:
+                        last_exported_id = records[-1]['no']
                     self.logger.info(f"Import for batch {last_exported_id} successful")
 
         self.logger.info("Finishing execution and closing connections")
